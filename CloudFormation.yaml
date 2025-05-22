@@ -1,0 +1,299 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Proyecto Capstone AWS - App web escalable con RDS, Load Balancer y Auto Scaling
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Par de claves SSH para EC2
+
+Resources:
+
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: CapstoneVPC }]
+
+  # IGW y NAT
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+
+  # Subredes Públicas
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: PublicSubnetA }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: PublicSubnetB }]
+
+  # Subredes Privadas
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.3.0/24
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: PrivateSubnetA }]
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.4.0/24
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: PrivateSubnetB }]
+
+  # Tablas de rutas
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRouteAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicRouteAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateRouteAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateRouteAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Security Group
+  AppSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso web y MySQL interno
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.0.0/16
+
+  # DB Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subredes privadas para RDS
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+  # RDS MySQL
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      Engine: mysql
+      EngineVersion: 8.0
+      MasterUsername: nodeapp
+      MasterUserPassword: student12
+      DBName: STUDENTS
+      VPCSecurityGroups: [ !Ref AppSG ]
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+  # Launch Template con user-data para conectarse a RDS
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: CapstoneAppTemplate
+      LaunchTemplateData:
+        InstanceType: t2.micro
+        ImageId: ami-0f9de6e2d2f067fca
+        KeyName: !Ref KeyName
+        SecurityGroupIds: [ !Ref AppSG ]
+        UserData:
+          Fn::Base64: !Sub |
+           #!/bin/bash -xe
+            apt update -y
+            apt install nodejs unzip wget npm mysql-client -y
+            wget https://aws-tc-largeobjects.s3.us-west-2.amazonaws.com/CUR-TF-200-ACCAP1-1-DEV/code.zip -P /home/ubuntu
+            cd /home/ubuntu
+            unzip code.zip -x "resources/codebase_partner/node_modules/*"
+            cd resources/codebase_partner
+            npm install aws aws-sdk
+            export APP_PORT=80
+            npm start &
+            echo '#!/bin/bash -xe
+            cd /home/ubuntu/resources/codebase_partner
+            export APP_PORT=80
+            npm start' > /etc/rc.local
+            chmod +x /etc/rc.local
+
+  # Target Group
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200
+      Targets:
+        - Id: !Ref TemplateInstance
+
+  # Load Balancer
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: CapstoneALB
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups: [ !Ref AppSG ]
+      Type: application
+
+  # Listener
+  AppListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: '1'
+      MaxSize: '3'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+      Tags:
+        - Key: Name
+          Value: AutoAppInstance
+          PropagateAtLaunch: true
+
+  # EC2 de referencia con user-data original
+  TemplateInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0f9de6e2d2f067fca
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds: [ !Ref AppSG ]
+      Tags:
+        - Key: Name
+          Value: TemplateInstance
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash -xe
+          apt update -y
+          apt install nodejs unzip wget npm mysql-server -y
+          wget https://aws-tc-largeobjects.s3.us-west-2.amazonaws.com/CUR-TF-200-ACCAP1-1/code.zip -P /home/ubuntu
+          cd /home/ubuntu
+          unzip code.zip -x "resources/codebase_partner/node_modules/*"
+          cd resources/codebase_partner
+          npm install aws aws-sdk
+          mysql -u root -e "CREATE USER 'nodeapp' IDENTIFIED WITH mysql_native_password BY 'student12'";
+          mysql -u root -e "GRANT all privileges on *.* to 'nodeapp'@'%';"
+          mysql -u root -e "CREATE DATABASE STUDENTS;"
+          mysql -u root -e "USE STUDENTS; CREATE TABLE students(
+                      id INT NOT NULL AUTO_INCREMENT,
+                      name VARCHAR(255) NOT NULL,
+                      address VARCHAR(255) NOT NULL,
+                      city VARCHAR(255) NOT NULL,
+                      state VARCHAR(255) NOT NULL,
+                      email VARCHAR(255) NOT NULL,
+                      phone VARCHAR(100) NOT NULL,
+                      PRIMARY KEY ( id ));"
+          sed -i 's/.*bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf
+          systemctl enable mysql
+          service mysql restart
+          export APP_DB_HOST=$(curl http://169.254.169.254/latest/meta-data/local-ipv4)
+          export APP_DB_USER=nodeapp
+          export APP_DB_PASSWORD=student12
+          export APP_DB_NAME=STUDENTS
+          export APP_PORT=80
+          npm start &
+          echo '#!/bin/bash -xe
+          cd /home/ubuntu/resources/codebase_partner
+          export APP_PORT=80
+          npm start' > /etc/rc.local
+          chmod +x /etc/rc.local
